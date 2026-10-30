@@ -1,77 +1,81 @@
-# qoder-credits-overlay
+# Qoder Credits Overlay
 
-**A Windows overlay that shows your real-time Qoder Credits deduction — only actual per-request billing, never estimates.**
+Qoder Credits Overlay 是一个面向 Windows 的 Qoder 积分悬浮窗工具，可实时显示本轮 Credits 消耗、分模型明细和会话累计，并在任务完成后提供消耗提示。窗口随 Qoder 移动和切换，支持展开查看、拖动定位及位置记忆。
 
-一个悬浮在 Qoder 窗口边缘的小胶囊，实时显示本次对话的实际积分扣减。只统计真实计费请求，不做任何按比例估算，也不把总额摊到单轮。
+![积分悬浮窗](docs/screenshot-chip.png)
 
-![chip screenshot](docs/screenshot-chip.png)
+## 安装配置
 
-## 特性
-
-- **只显示实扣**：数据来自 Qoder 客户端本地日志里逐请求的计费记录（`ForkCompletionBilling`），`billable=false` 的请求记 0。估算、摊派一概没有。
-- **按模型分桶**：本轮消耗与会话累计都按模型分开统计。
-- **隐藏扣减也归位**：compact / memory / skill 等后台子请求的费用，通过 requestId 精确 join 回它们所属的那一轮，而不是留在会话级黑盒里。
-- **总账对账**：只读解密 Qoder 写在会话目录的 `state.json` 总账（AES-256-GCM），把日志口径和客户端总账对齐，误差方向可解释（已计费未落盘）。
-- **贴窗悬浮**：胶囊默认吸附在 Qoder 窗口左边缘（内缩 10px、垂直居中），可拖动、落点持久化；左键展开详情、右键收起；Qoder 最小化或收进托盘时整体隐藏。
-- **零依赖**：Node.js 只用内置模块，overlay 是 PowerShell + WPF，不装任何 npm 包。
-
-## 安全模型
-
-这是本项目最重要的部分：
-
-- **只读本机文件**，不发起任何网络请求。
-- **不碰任何凭据**：不读、不解密、不打印 `%APPDATA%\com.qoder.app.stable\auth.v1.dat`，不接触任何 token / cookie。
-- usage-log 解析只白名单四类计费元数据行，**不存 prompt 内容**。
-- 所有运行时数据（事件流、归属缓存、错误日志）都写在 `%LOCALAPPDATA%\QoderCredits`，不污染仓库。
-
-`state.json` 的主密钥硬编码在 Qoder 客户端程序里（`qoder-worker-runtime.obf.mjs`），本项目只是复用它做**只读**对账；客户端换密钥时对账自动降级为 transcript 口径，不会崩。
-
-## 环境要求
-
-- Windows 10/11（overlay 依赖 PowerShell 5.1 + WPF）
-- [Qoder](https://qoder.com) 桌面客户端
-- Node.js ≥ 18
-
-## 安装
+安装 Node.js 24 或更高版本后，在 PowerShell 中运行：
 
 ```powershell
-git clone https://github.com/<you>/qoder-credits-overlay.git
+git clone https://github.com/ZhihaoQiao233/qoder-credits-overlay.git
 cd qoder-credits-overlay
-npm run install-hooks   # 向 ~/.qoder/settings.json 写入三条 hook（UserPromptSubmit/Stop/SessionEnd）
-npm run watch           # 前台启动 watcher；想后台跑用 Start-Process node src/watcher.js -WindowStyle Hidden
+npm run install-hooks
 ```
 
-watcher 会通过单实例锁（`watcher.lock`）防止重复启动，并自动拉起 overlay 进程；overlay 侧有互斥锁 `Local\QoderCreditsOverlay`。
+项目无第三方依赖，无需执行 `npm install`。
 
-## 卸载
+安装完成后，在 Qoder 中提交一条新消息，悬浮窗会自动启动。也可以在项目目录手动启动：
 
 ```powershell
-npm run uninstall-hooks   # 从 settings.json 移除 hook（只删本项目写入的条目）
+npm run watch
 ```
 
-再结束 watcher 进程即可。hook 条目带 `qoder-credits-overlay` 标记，不会误伤其他配置。
+当前仅支持 Windows，已验证环境为 Windows 11、PowerShell 5.1、Node.js 24 和 Qoder Desktop 0.4.11。
 
-## 使用
+## 使用说明
 
-- 胶囊默认贴在 Qoder 窗口左边缘，**拖动**可换位置，重启后仍在原位。
-- **左键**（未拖动时）展开详情卡：**右键**收起。
-- Qoder 最小化/收托盘时胶囊整体隐藏；被其他窗口盖住时不抢置顶——这是有意设计，胶囊的职责是不挡事。
+胶囊默认位于 Qoder 窗口左侧，可拖动调整位置，重启后保留。点击胶囊展开明细，右键明细卡收起。
 
-## 调试工具
+悬浮窗跟随 Qoder 移动，切换到其他窗口时随 Qoder 一起被遮挡，最小化时隐藏。任务运行期间持续更新用量，完成后显示本轮消耗提示。
 
-- `node tools/selfcheck.mjs` — 解密本地总账，打印总账口径、transcript 口径与残差。
-- `node tools/audit-usage.mjs` — 离线对账：把 usage-log 证据、transcript、总账三方 join，逐模型核对。
+首次安装后需提交一条消息，以获取会话路径。界面显示“同步中”时，表示尚未读取到对应数据。
 
-## 测试
+## 数据来源
+
+积分来自 Qoder 的本地计费记录，免费请求计为 0，不通过 token 数和单价估算。
+
+主对话以及上下文压缩、记忆生成、技能演进等后台调用，均通过请求 ID 关联到对应轮次。后台计费记录可能晚于主回复写入，显示数值会随记录更新。
+
+程序不联网，无需提供账号 Token 或 Cookie。它会读取本地会话文件和日志，缓存仅保存计费信息，不保存对话正文。运行缓存、窗口位置和错误日志位于：
+
+```text
+%LOCALAPPDATA%\QoderCredits
+```
+
+<details>
+<summary>统计原理与对账工具</summary>
+
+主对话取会话记录中的 `usage.credits`，后台调用取 worker 日志中的逐请求计费字段，只有 `billable=true` 才计入消耗。会话累计还会读取客户端的本地用量总账，日志和总账之间可能有落盘时间差。
+
+总账读取复用了客户端内置的固定密钥，不是用户的登录凭据。如果客户端更换密钥，总账对账会停用，日志和会话记录的统计仍会继续。
+
+需要核对某个会话时，可以运行：
 
 ```powershell
-npm test    # 62 个用例：解析、归属、原子写、校准降级、overlay 脚本 AST 等
+node tools/selfcheck.mjs "C:/path/to/session.jsonl" "C:/path/to/workspace"
+node tools/audit-usage.mjs "C:/path/to/session.jsonl" "C:/path/to/workspace"
 ```
 
-## 免责声明
+`selfcheck.mjs` 查看总账与会话记录的差额，`audit-usage.mjs` 列出逐轮计费归属。输出包含本机路径和会话 ID，分享前请检查内容。
 
-本项目是**非官方**的独立作品，与 Qoder 及其开发商无任何隶属、赞助或认可关系。Qoder 是 Qoder Inc. 的商标。项目通过阅读本机客户端日志工作，日志格式随客户端版本变化时相关功能可能失效——欢迎提 issue 或 PR。
+</details>
 
-## License
+## 配置与卸载
 
-[MIT](LICENSE)
+安装时会在 `%USERPROFILE%\.qoder\settings.json` 中注册三个 Hook，接收任务开始、结束和会话关闭事件。运行期间需保留项目目录；移动目录后，重新执行 `npm run install-hooks`。
+
+卸载时，在项目目录运行：
+
+```powershell
+npm run uninstall-hooks
+```
+
+该命令移除本项目的 Hook，保留其他设置。已运行的悬浮窗和监视器需另行结束，本地缓存不会自动删除。
+
+## 问题反馈
+
+Qoder 升级可能改变本地日志格式。如遇用量不更新、窗口定位异常等问题，可在 [Issues](https://github.com/ZhihaoQiao233/qoder-credits-overlay/issues) 中附上 Qoder 版本、问题描述和截图，请勿上传完整会话日志。
+
+个人维护的非官方工具。[MIT License](LICENSE)。

@@ -7,6 +7,16 @@ QoderCredits/
 state.json
 attribution.json
 watcher.lock
+events.jsonl
+overlay-pos.json
+*.tmp
+.env
+.env.*
+!.env.example
+auth.v1.dat
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
 
 # OS junk
 Thumbs.db

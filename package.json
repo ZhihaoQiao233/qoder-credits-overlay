@@ -10,7 +10,7 @@
     "url": "https://github.com/ZhihaoQiao233/qoder-credits-overlay.git"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=24"
   },
   "keywords": [
     "qoder",
@@ -21,7 +21,6 @@
     "usage-tracking"
   ],
   "scripts": {
-    "test": "node --test test/*.test.js",
     "watch": "node src/watcher.js",
     "install-hooks": "node src/install-hooks.js install",
     "uninstall-hooks": "node src/install-hooks.js uninstall"

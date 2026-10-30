@@ -11,8 +11,13 @@ const EVENTS = {
   SessionEnd: 'session-end'
 };
 
-function isOurs(definition) {
-  return Array.isArray(definition?.hooks) && definition.hooks.some((handler) => handler?.name === MARKER);
+function withoutOurHandlers(definitions) {
+  return definitions.flatMap((definition) => {
+    if (!Array.isArray(definition?.hooks)) return [definition];
+    const kept = definition.hooks.filter((handler) => handler?.name !== MARKER);
+    if (kept.length === definition.hooks.length) return [definition];
+    return kept.length ? [{ ...definition, hooks: kept }] : [];
+  });
 }
 
 function clone(settings) {
@@ -23,7 +28,7 @@ export function mergeHooks(settings, { command, args }) {
   const next = clone(settings);
   const hooks = { ...(next.hooks ?? {}) };
   for (const [event, eventName] of Object.entries(EVENTS)) {
-    const kept = Array.isArray(hooks[event]) ? hooks[event].filter((definition) => !isOurs(definition)) : [];
+    const kept = Array.isArray(hooks[event]) ? withoutOurHandlers(hooks[event]) : [];
     kept.push({
       hooks: [
         {
@@ -48,7 +53,7 @@ export function removeHooks(settings) {
   const hooks = { ...next.hooks };
   for (const event of Object.keys(hooks)) {
     if (!Array.isArray(hooks[event])) continue;
-    const kept = hooks[event].filter((definition) => !isOurs(definition));
+    const kept = withoutOurHandlers(hooks[event]);
     if (kept.length) hooks[event] = kept;
     else delete hooks[event];
   }
@@ -95,7 +100,7 @@ function main() {
     const merged = mergeHooks(settings, { command: process.execPath, args: [appPaths.hookScript()] });
     saveSettings(settingsFile, merged);
     console.log(`已写入 ${settingsFile}`);
-    console.log(JSON.stringify(merged.hooks, null, 2));
+    console.log('已配置 UserPromptSubmit / Stop / SessionEnd');
   } else {
     const cleaned = removeHooks(settings);
     saveSettings(settingsFile, cleaned);
