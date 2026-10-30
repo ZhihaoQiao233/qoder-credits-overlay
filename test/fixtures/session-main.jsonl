@@ -1,0 +1,5 @@
+{"type":"user","timestamp":"2026-10-29T10:09:00.000Z","sessionId":"s1","message":{"role":"user","content":"hello"}}
+{"type":"assistant","timestamp":"2026-10-29T10:09:30.000Z","sessionId":"s1","message":{"id":"old-1","usage":{"credits":5,"billable":true,"request_id":"old-1"}}}
+{"type":"assistant","timestamp":"2026-10-29T10:11:00.000Z","sessionId":"s1","message":{"id":"r1","usage":{"credits":2,"billable":true,"request_id":"r1"}}}
+{"type":"assistant","timestamp":"2026-10-29T10:11:01.000Z","sessionId":"s1","message":{"id":"r1","usage":{"credits":2,"billable":true,"request_id":"r1"}}}
+{"type":"assistant","timestamp":"2026-10-29T10:12:00.000Z","sessionId":"s1","message":{"id":"r2","usage":{"credits":3,"billable":false,"request_id":"r2"}}}

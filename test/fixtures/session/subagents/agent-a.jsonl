@@ -1,0 +1,4 @@
+{"type":"assistant","timestamp":"2026-10-29T10:11:00.000Z","sessionId":"parent","message":{"id":"a1","usage":{"credits":2,"billable":true,"request_id":"a1"}}}
+{"type":"assistant","timestamp":"2026-10-29T10:12:00.000Z","sessionId":"parent","message":{"id":"a2","usage":{"credits":2.5,"billable":true,"request_id":"a2"}}}
+{"type":"assistant","timestamp":"2026-10-29T10:13:00.000Z","sessionId":"parent","message":{"id":"a3","usage":{"credits":1,"billable":false,"request_id":"a3"}}}
+{"type":"assistant","timestamp":"2026-10-29T10:30:00.000Z","sessionId":"parent","message":{"id":"a4","usage":{"credits":9,"billable":true,"request_id":"a4"}}}

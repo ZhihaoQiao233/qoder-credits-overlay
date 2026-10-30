@@ -1,0 +1,14 @@
+node_modules/
+*.log
+npm-debug.log*
+
+# Runtime data lives in %LOCALAPPDATA%\QoderCredits, but ignore it anywhere just in case
+QoderCredits/
+state.json
+attribution.json
+watcher.lock
+
+# OS junk
+Thumbs.db
+Desktop.ini
+.DS_Store
