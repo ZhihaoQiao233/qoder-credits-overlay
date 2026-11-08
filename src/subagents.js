@@ -4,8 +4,10 @@ import { JsonlTailer } from './transcript.js';
 
 export class SubagentScanner {
   constructor(transcriptPath) {
-    this.directory = path.join(path.dirname(transcriptPath), 'subagents');
+    this.sessionId = path.basename(transcriptPath, path.extname(transcriptPath));
+    this.directory = path.join(path.dirname(transcriptPath), this.sessionId, 'subagents');
     this.tailers = new Map();
+    this.toolUseIds = new Map();
   }
 
   scanNew() {
@@ -20,7 +22,13 @@ export class SubagentScanner {
       if (!name.endsWith('.jsonl')) continue;
       const filePath = path.join(this.directory, name);
       if (!this.tailers.has(filePath)) this.tailers.set(filePath, new JsonlTailer(filePath));
-      records.push(...this.tailers.get(filePath).readNew());
+      try {
+        const meta = JSON.parse(fs.readFileSync(filePath.replace(/\.jsonl$/, '.meta.json'), 'utf8'));
+        if (typeof meta.toolUseId === 'string') this.toolUseIds.set(name, meta.toolUseId);
+      } catch {}
+      records.push(...this.tailers.get(filePath).readNew()
+        .filter(record => record.sessionId === this.sessionId)
+        .map(record => ({ ...record, subagentFile: name })));
     }
     return records;
   }

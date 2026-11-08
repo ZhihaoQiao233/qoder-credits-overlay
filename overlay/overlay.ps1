@@ -1,6 +1,8 @@
 ﻿Add-Type -AssemblyName PresentationFramework
 Add-Type -AssemblyName PresentationCore
 Add-Type -AssemblyName WindowsBase
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
 Add-Type @"
 using System;
 using System.Text;
@@ -469,12 +471,41 @@ function Format-HiddenTotal($byModel) {
   return $total
 }
 
+function Get-RouteSessionId([string]$route) {
+  if ($route -match '^qoder-app://renderer/[^#]*#/chat/([a-fA-F0-9-]{36})(?:[?]|$)') { return $Matches[1] }
+  return $null
+}
+
+function Get-ViewedSessionId([IntPtr]$handle) {
+  if ($handle -eq [IntPtr]::Zero) { return $null }
+  try {
+    $root = [System.Windows.Automation.AutomationElement]::FromHandle($handle)
+    $condition = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Document)
+    $document = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $condition)
+    $pattern = $null
+    if ($document -and $document.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$pattern)) {
+      return Get-RouteSessionId $pattern.Current.Value
+    }
+  } catch {}
+  return $null
+}
+
+function Select-ViewedSession($state, [string]$sessionId) {
+  if ($sessionId -and $state.sessions) {
+    $property = $state.sessions.PSObject.Properties[$sessionId]
+    if ($property) { return $property.Value }
+  }
+  return $null
+}
+
+$script:viewedSessionId = $null
 $script:lastCompletedAt = $null
 $script:baselineSet = $false
 
 $update = {
   try {
     if (-not (Test-Path -LiteralPath $statePath)) {
+      $chipLabel.Text = '积分'
       $chipValue.Text = '--'
       $taskValue.Text = '--'
       $modelValue.Text = ''
@@ -486,11 +517,16 @@ $update = {
     }
 
     $state = Read-SharedJson $statePath
-    $session = $null
-    if ($state.currentSessionId -and $state.sessions) {
-      $prop = $state.sessions.PSObject.Properties[$state.currentSessionId]
-      if ($prop) { $session = $prop.Value }
+    $viewedSessionId = Get-ViewedSessionId (Find-QoderWindow)
+    if ($viewedSessionId -ne $script:viewedSessionId) {
+      $script:viewedSessionId = $viewedSessionId
+      $toast.Hide()
+      $toastTimer.Stop()
+      $script:toastPending = $false
+      $script:lastCompletedAt = [string]$state.lastCompleted.at
+      $script:baselineSet = $true
     }
+    $session = Select-ViewedSession $state $viewedSessionId
 
     if ($session) {
       # Only recorded server charges are shown; background completion is unknown.
@@ -499,9 +535,15 @@ $update = {
       if ($null -ne $session.exactConversationCredits) {
         $conversation = [double]$session.exactConversationCredits
       }
+      $chipLabel.Text = '积分'
       $chipValue.Text = ('{0:F2}' -f $task)
       $taskValue.Text = ('{0:F2}' -f $task)
-      $taskLabel.Text = '本轮消耗'
+      $taskLabel.Text = '本轮已记录'
+      if ([string]$session.status -eq 'running') {
+        # A running total is still growing; label it so it cannot be read as final.
+        $chipLabel.Text = '记录中'
+        $taskLabel.Text = '本轮记录中 · 待结清'
+      }
       $convValue.Text = ('{0:F2} Credits' -f $conversation)
       $modelValue.Text = Format-ModelBreakdown $session.taskByModel
       $hiddenTotal = Format-HiddenTotal $session.taskByModel
@@ -522,13 +564,26 @@ $update = {
       }
 
       $calibValue.Foreground = Brush '#88FFFFFF'
-      $calibValue.Text = '实时统计'
-      if ($session.status -eq 'completed') { $calibValue.Text = '' }
-      if ($session.taskAttribution -eq 'transcript-only') { $calibValue.Text = '同步中' }
-      if ($session.ledgerReconciliation -and [double]$session.ledgerReconciliation.unmatchedCredits -gt 0.0001) {
-        $calibValue.Text = '同步中'
+      $calibValue.Text = '等待官网同步'
+      if ($session.taskAttribution -eq 'official-api') {
+        $taskLabel.Text = '本轮官网实扣'
+        $calibValue.Text = '官网已同步'
+        if ($state.officialSync.status -ne 'synced') { $calibValue.Text = '官网缓存' }
+        if ($session.taskOfficialUpdatedAt) {
+          $syncTime = ([DateTimeOffset]::Parse([string]$session.taskOfficialUpdatedAt)).ToLocalTime().ToString('HH:mm:ss')
+          $calibValue.Text += (' ' + $syncTime)
+        }
+      } else {
+        switch ([string]$state.officialSync.status) {
+          'login-required' { $calibValue.Text = '请在专用 Edge 登录' }
+          'browser-closed' { $calibValue.Text = '专用 Edge 已关闭' }
+          'usage-page-missing' { $calibValue.Text = '请打开用量明细页' }
+          'sync-failed' { $calibValue.Text = '官网同步失败' }
+          'invalid-data' { $calibValue.Text = '官网数据待核验' }
+        }
       }
     } else {
+      $chipLabel.Text = '积分'
       $chipValue.Text = '--'
       $taskValue.Text = '--'
       $modelValue.Text = ''
@@ -539,7 +594,9 @@ $update = {
     }
 
     $completedAt = $null
-    if ($state.lastCompleted) { $completedAt = [string]$state.lastCompleted.at }
+    if ($session -and $state.lastCompleted.sessionId -eq $viewedSessionId) {
+      $completedAt = [string]$state.lastCompleted.at
+    }
     if ($completedAt) {
       if (-not $script:baselineSet) {
         $script:lastCompletedAt = $completedAt
@@ -547,7 +604,10 @@ $update = {
       } elseif ($completedAt -ne $script:lastCompletedAt) {
         $script:lastCompletedAt = $completedAt
         $done = [double]$state.lastCompleted.taskCredits
-        $toastTask.Text = ('本轮消耗 {0:F2} Credits' -f $done)
+        $toastTask.Text = ('已记录 {0:F2} Credits' -f $done)
+        if ($state.lastCompleted.attribution -eq 'official-api') {
+          $toastTask.Text = ('官网实扣 {0:F2} Credits' -f $done)
+        }
         if ($session) {
           $convDone = [double]$session.conversationCredits
           if ($null -ne $session.exactConversationCredits) {
@@ -567,6 +627,7 @@ $update = {
       New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
       Add-Content -LiteralPath $errorPath -Encoding UTF8 -Value ("{0} overlay {1}" -f (Get-Date).ToUniversalTime().ToString('o'), $_.Exception.Message)
     } catch {}
+    $chipLabel.Text = '积分'
     $chipValue.Text = '!'
     $statusValue.Text = '读取状态失败'
     $statusValue.Foreground = Brush '#FFFF8A80'

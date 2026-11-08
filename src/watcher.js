@@ -10,8 +10,11 @@ import { readSessionCredits, stateFileFor, workspaceRootOf } from './session-sta
 import * as appPaths from './paths.js';
 import { UsageLogIndex } from './usage-log.js';
 import { atomicWriteJson } from './atomic-state.js';
+import { OfficialUsageIndex } from './official-usage.js';
+import { EdgeUsageSource } from './edge-usage.js';
 
 const round2 = (value) => Math.round(value * 100) / 100;
+const credits2 = value => Math.trunc(value * 100 + Math.sign(value) * 1e-9) / 100;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const calibrationMessage = (official, transcript, turns) =>
   `${turns ? `近 ${turns} 轮 ` : ''}官网 ${official} · 记录 ${transcript.toFixed(2)} · 幕后 ${(official - transcript).toFixed(2)}`;
@@ -72,6 +75,20 @@ export class Watcher {
     this.eventsFile = options.eventsFile || appPaths.eventsPath();
     this.stateFile = options.stateFile || appPaths.statePath();
     this.attributionFile = options.attributionFile || path.join(this.dataDir, 'attribution.json');
+    this.officialUsageFile = options.officialUsageFile || path.join(this.dataDir, 'official-usage.json');
+    this.officialSource = options.officialSource ?? null;
+    this.officialSyncMs = options.officialSyncMs ?? 30000;
+    this.settleSyncMs = options.settleSyncMs ?? 5000;
+    this.settleWindowMs = options.settleWindowMs ?? 120000;
+    this.fastUntil = 0;
+    this.nextOfficialSync = 0;
+    this.officialSyncPending = false;
+    this.officialUsage = new OfficialUsageIndex();
+    this.officialSync = { status: 'not-synced', updatedAt: null };
+    try {
+      this.officialUsage = new OfficialUsageIndex(JSON.parse(fs.readFileSync(this.officialUsageFile, 'utf8')));
+      this.officialSync = { status: 'cached', updatedAt: this.officialUsage.snapshot.updatedAt };
+    } catch {}
     this.followLog = options.logPath === undefined;
     this.logPath = this.followLog ? null : options.logPath;
     this.stopGraceMs = options.stopGraceMs ?? 1000;
@@ -85,6 +102,7 @@ export class Watcher {
     this.sessions = new Map();
     this.currentSessionId = null;
     this.lastCompleted = null;
+    this.lastCompletedTask = null;
     this.completedTurns = [];
     this.quotaAnchor = null;
     this.window = null;
@@ -209,26 +227,36 @@ export class Watcher {
     const knownByModel = {};
     for (const r of hidden) knownByModel[r.model] = (knownByModel[r.model] ?? 0) + r.credits;
     for (const task of session.tasks) {
-      const windowRecords = records.filter(r => r.timestamp >= task.start && (!task.stop || r.timestamp <= task.stop));
-      const windowObserved = observed.filter(r => r.timestamp >= task.start && (!task.stop || r.timestamp <= task.stop));
+      const windowObserved = observed.filter(r => !r.subagentFile && r.timestamp >= task.start && (!task.stop || r.timestamp <= task.stop));
       const owners = new Set(windowObserved.map(r => byRequest.get(r.requestId)?.ownerId).filter(Boolean));
       if (task.requestSetId) owners.add(task.requestSetId);
       task.ownerId = owners.size === 1 ? [...owners][0] : null;
       // Multiple Hook submissions can be steering messages in the same official
       // request set. In that case show the official row's complete known chat.
-      const chat = task.ownerId ? records.filter(r => byRequest.get(r.requestId)?.ownerId === task.ownerId ||
-        (!byRequest.get(r.requestId)?.ownerId && windowRecords.includes(r))) : windowRecords;
+      const parents = task.ownerId ? observed.filter(r => !r.subagentFile &&
+        (byRequest.get(r.requestId)?.ownerId === task.ownerId ||
+        (!byRequest.get(r.requestId)?.ownerId && windowObserved.includes(r)))) : windowObserved;
+      const parentIds = new Set(parents.map(r => r.requestId));
+      const chat = records.filter(r => !r.subagentFile && parentIds.has(r.requestId));
+      for (const r of records.filter(r => r.subagentFile)) {
+        const owner = byRequest.get(r.requestId)?.ownerId;
+        const parent = session.mainTailer.requestForTool(session.subagents.toolUseIds.get(r.subagentFile));
+        if (owner ? owner === task.ownerId : parentIds.has(parent)) chat.push(r);
+      }
       task.chatByModel = {};
       for (const r of chat) task.chatByModel[r.model] = (task.chatByModel[r.model] ?? 0) + r.credits;
       task.hidden = {};
       if (task.ownerId) for (const r of hidden.filter(r => r.ownerId === task.ownerId)) {
         task.hidden[r.model] = (task.hidden[r.model] ?? 0) + r.credits;
       }
-      task.attribution = task.ownerId && chat.every(r => byRequest.get(r.requestId)?.ownerId === task.ownerId) ? 'request-id' : 'transcript-only';
-      if (task.stop && this.lastCompleted?.sessionId === session.sessionId && this.lastCompleted.at === task.stop) {
+      task.official = this.officialUsage.get(session.sessionId, task.requestSetId);
+      task.attribution = task.official ? 'official-api' :
+        task.ownerId && chat.every(r => byRequest.get(r.requestId)?.ownerId === task.ownerId) ? 'request-id' : 'transcript-only';
+      if (task === this.lastCompletedTask && this.lastCompleted?.sessionId === session.sessionId && this.lastCompleted.at === task.stop) {
         this.lastCompleted.taskCredits = this.#taskTotal(task);
-        this.lastCompleted.settlement = 'pending';
-        this.lastCompleted.requestSetId = task.ownerId;
+        this.lastCompleted.settlement = task.official ? 'synced' : 'pending';
+        this.lastCompleted.attribution = task.attribution;
+        this.lastCompleted.requestSetId = task.requestSetId ?? task.ownerId;
       }
     }
     const ledger = this.#ledger(session);
@@ -251,14 +279,22 @@ export class Watcher {
   }
 
   #taskTotal(task) {
+    return task.official?.credits ?? this.#taskRecordedTotal(task);
+  }
+
+  #taskRecordedTotal(task) {
     let total = 0;
     for (const value of Object.values(task.chatByModel ?? {})) total += value;
     for (const value of Object.values(task.hidden ?? {})) total += value;
-    return round2(total);
+    return credits2(total);
   }
 
   #taskBreakdown(session, snapshot) {
     const task = session.tasks.length ? session.tasks[session.tasks.length - 1] : null;
+    if (task?.official) return {
+      ...task.official, ownerId: task.requestSetId ?? task.ownerId, attribution: 'official-api',
+      recordedCredits: this.#taskRecordedTotal(task)
+    };
     const chat = task?.chatByModel ?? snapshot.taskByModel ?? {};
     const hidden = task?.hidden ?? {};
     const byModel = {};
@@ -267,17 +303,23 @@ export class Watcher {
       const chatCredits = chat[model] ?? 0;
       const hiddenCredits = hidden[model] ?? 0;
       byModel[model] = {
-        chat: round2(chatCredits),
-        hidden: round2(hiddenCredits),
-        total: round2(chatCredits + hiddenCredits)
+        chat: credits2(chatCredits),
+        hidden: credits2(hiddenCredits),
+        total: credits2(chatCredits + hiddenCredits)
       };
       total += chatCredits + hiddenCredits;
     }
-    return { credits: round2(total), byModel, ownerId: task?.ownerId ?? null, attribution: task?.attribution ?? 'transcript-only' };
+    return { credits: credits2(total), recordedCredits: credits2(total), byModel,
+      ownerId: task?.requestSetId ?? task?.ownerId ?? null, attribution: task?.attribution ?? 'transcript-only', updatedAt: null };
   }
 
   #taskCalibration(session, snapshot, exact) {
     const transcript = round2(snapshot.taskCredits);
+    if (exact.attribution === 'official-api') return {
+      source: 'official-api', official: exact.credits, knownActual: exact.credits,
+      recorded: exact.recordedCredits, updatedAt: exact.updatedAt,
+      message: `官网实扣 ${exact.credits.toFixed(2)} · 已记录 ${exact.recordedCredits.toFixed(2)}`
+    };
     if (exact.ownerId) {
       return {
         source: 'worker-log', official: null, knownActual: exact.credits, transcript,
@@ -367,11 +409,18 @@ export class Watcher {
       if (!replayed && this.stopGraceMs > 0) await sleep(this.stopGraceMs);
       this.#ingest(session);
       const snapshot = this.aggregator.snapshot(event.sessionId);
-      for (const task of session.tasks) {
-        if (task.stop) continue;
+      const open = session.tasks.filter(task => !task.stop);
+      for (const task of open) {
         task.stop = event.at;
         task.chat = round2(snapshot.taskCredits);
         task.chatByModel = snapshot.taskByModel;
+      }
+      // Overlapping submissions share one Stop; its request set belongs only to
+      // the newest one, so older turns stay unjoined instead of inheriting it.
+      const owner = open[open.length - 1] ?? null;
+      if (owner) {
+        owner.requestSetId ??= event.requestSetId ?? null;
+        this.lastCompletedTask = owner;
       }
       const exact = this.#taskBreakdown(session, snapshot);
       this.lastCompleted = {
@@ -385,6 +434,12 @@ export class Watcher {
         completedAt: event.at
       });
       if (this.completedTurns.length > MAX_TURNS) this.completedTurns.shift();
+      if (!replayed) {
+        // The official row keeps growing for a while after Stop, so poll it
+        // closely instead of showing a half-settled value for 30 seconds.
+        this.fastUntil = Date.now() + this.settleWindowMs;
+        this.nextOfficialSync = 0;
+      }
     } else if (event.event === 'session-end') {
       session.endedAt = event.at;
     }
@@ -417,17 +472,20 @@ export class Watcher {
       const exact = this.#taskBreakdown(session, snapshot);
       sessions[sessionId] = {
         taskCredits: exact.credits,
+        taskRecordedCredits: exact.recordedCredits,
+        taskOfficialUpdatedAt: exact.updatedAt,
         taskTranscriptCredits: round2(snapshot.taskCredits),
         taskByModel: exact.byModel,
         taskRequestSetId: exact.ownerId,
         taskAttribution: exact.attribution,
-        taskSettlement: 'pending',
+        taskSettlement: exact.attribution === 'official-api' ? 'synced' : 'pending',
         ledgerReconciliation: session.reconciliation,
         recentTasks: session.tasks.map(t => ({ startedAt: t.start, completedAt: t.stop,
-          requestSetId: t.ownerId, knownActual: this.#taskTotal(t), attribution: t.attribution,
-          settlement: 'pending', hiddenByModel: t.hidden })),
-        conversationCredits: round2(snapshot.conversationCredits),
-        exactConversationCredits: ledger ? round2(ledger.totalCredits) : null,
+          requestSetId: t.requestSetId ?? t.ownerId, knownActual: this.#taskTotal(t), attribution: t.attribution,
+          recordedCredits: this.#taskRecordedTotal(t), officialUpdatedAt: t.official?.updatedAt ?? null,
+          settlement: t.official ? 'synced' : 'pending', hiddenByModel: t.hidden })),
+        conversationCredits: credits2(snapshot.conversationCredits),
+        exactConversationCredits: ledger ? credits2(ledger.totalCredits) : null,
         status: snapshot.status,
         startedAt: snapshot.startedAt,
         completedAt: snapshot.completedAt,
@@ -439,6 +497,7 @@ export class Watcher {
       updatedAt: new Date().toISOString(),
       currentSessionId: this.currentSessionId,
       lastCompleted: this.lastCompleted,
+      officialSync: { ...this.officialSync },
       window: this.window,
       sessions
     };
@@ -446,6 +505,33 @@ export class Watcher {
 
   async #writeState(state) {
     await atomicWriteJson(this.stateFile, state);
+  }
+
+  #officialDelay() {
+    return Date.now() < this.fastUntil ? this.settleSyncMs : this.officialSyncMs;
+  }
+
+  async syncOfficial() {
+    if (!this.officialSource || this.officialSyncPending || !this.sessions.size) return;
+    this.officialSyncPending = true;
+    this.nextOfficialSync = Date.now() + this.#officialDelay();
+    try {
+      const now = Date.now();
+      const starts = [...this.sessions.values()].flatMap(s => s.tasks.map(t => Date.parse(t.start))).filter(Number.isFinite);
+      const startTime = Math.max(0, Math.min(now, ...starts) - 86400000);
+      const result = await this.officialSource.read({ sessionIds: [...this.sessions.keys()], startTime, endTime: now });
+      const index = new OfficialUsageIndex({ ...result, version: 1, updatedAt: new Date().toISOString() });
+      await atomicWriteJson(this.officialUsageFile, index.snapshot);
+      this.officialUsage = index;
+      this.officialSync = { status: 'synced', updatedAt: index.snapshot.updatedAt };
+    } catch (error) {
+      const allowed = ['browser-closed', 'login-required', 'usage-page-missing', 'invalid-data'];
+      this.officialSync = { status: allowed.includes(error.code) ? error.code : 'sync-failed',
+        updatedAt: this.officialUsage.snapshot?.updatedAt ?? null };
+    } finally {
+      this.officialSyncPending = false;
+      this.nextOfficialSync = Date.now() + this.#officialDelay();
+    }
   }
 
   async runOnce() {
@@ -511,6 +597,7 @@ export class Watcher {
           this.#spawnOverlay();
         }
         await this.runOnce();
+        if (Date.now() >= this.nextOfficialSync) void this.syncOfficial();
       } catch (error) {
         this.#logError(error);
       }
@@ -563,7 +650,8 @@ function acquireLock(lockFile) {
 async function main() {
   const lockFile = appPaths.lockPath();
   if (!acquireLock(lockFile)) return;
-  const watcher = new Watcher({ launchOverlay: true });
+  const officialSource = new EdgeUsageSource({ profileDir: path.join(appPaths.dataDir(), 'edge-billing-profile') });
+  const watcher = new Watcher({ launchOverlay: true, officialSource });
   const cleanup = () => {
     watcher.close();
     fs.rmSync(lockFile, { force: true });
@@ -572,6 +660,9 @@ async function main() {
   process.on('SIGINT', cleanup);
   process.on('SIGTERM', cleanup);
   process.on('exit', () => fs.rmSync(lockFile, { force: true }));
+  try { await officialSource.open(); } catch {
+    watcher.officialSync.status = 'browser-closed';
+  }
   watcher.start();
 }
 

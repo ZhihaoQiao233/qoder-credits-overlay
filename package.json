@@ -1,6 +1,6 @@
 {
   "name": "qoder-credits-overlay",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Real-time Qoder Credits deduction overlay for Windows: a docked chip that shows only actual per-request billing, never estimates.",
   "license": "MIT",
   "type": "module",
@@ -21,6 +21,7 @@
     "usage-tracking"
   ],
   "scripts": {
+    "test": "node --test test/*.test.js",
     "watch": "node src/watcher.js",
     "install-hooks": "node src/install-hooks.js install",
     "uninstall-hooks": "node src/install-hooks.js uninstall"

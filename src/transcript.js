@@ -31,6 +31,12 @@ export class JsonlTailer {
     this.filePath = filePath;
     this.offset = 0;
     this.remainder = '';
+    this.toolMessages = new Map();
+    this.messageRequests = new Map();
+  }
+
+  requestForTool(toolUseId) {
+    return this.messageRequests.get(this.toolMessages.get(toolUseId)) ?? null;
   }
 
   reset() {
@@ -61,6 +67,17 @@ export class JsonlTailer {
 
     const { lines, remainder } = splitCompleteLines(this.remainder + buffer.toString('utf8'));
     this.remainder = remainder;
+    for (const line of lines) {
+      try {
+        const entry = JSON.parse(line);
+        if (entry.type !== 'assistant' || !entry.message?.id) continue;
+        const message = entry.message;
+        if (message.usage?.request_id) this.messageRequests.set(message.id, message.usage.request_id);
+        if (Array.isArray(message.content)) for (const part of message.content) {
+          if (part.type === 'tool_use' && typeof part.id === 'string') this.toolMessages.set(part.id, message.id);
+        }
+      } catch {}
+    }
     return lines.map(parseTranscriptLine).filter(Boolean);
   }
 }

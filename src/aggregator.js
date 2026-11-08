@@ -92,15 +92,9 @@ export class UsageAggregator {
   // 总账里记着最后一次落盘的 request_id，照它切一刀就知道总账算到了哪一条记录。
   sumByModelThrough(sessionId, requestId, fallbackTimestamp) {
     const st = this.#sessions.get(sessionId);
-    const totals = {};
-    if (!st) return totals;
-    const cut = requestId ? st.all.findIndex((record) => record.requestId === requestId) : -1;
-    if (cut < 0) return this.sumByModelUpTo(sessionId, fallbackTimestamp);
-    for (let index = 0; index <= cut; index += 1) {
-      const record = st.all[index];
-      totals[record.model] = (totals[record.model] ?? 0) + record.credits;
-    }
-    return totals;
+    if (!st) return {};
+    const last = requestId ? st.all.find(record => record.requestId === requestId) : null;
+    return this.sumByModelUpTo(sessionId, last?.timestamp ?? fallbackTimestamp);
   }
 
   snapshot(sessionId) {
