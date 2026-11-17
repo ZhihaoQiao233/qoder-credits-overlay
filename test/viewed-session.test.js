@@ -89,6 +89,28 @@ test('official display takes precedence over ledger residuals and marks offline 
   assert.equal(result.offlineChip, '968.92');
 });
 
+test('conversation total prefers the official sum and labels its source', { skip: process.platform !== 'win32' }, () => {
+  const state = { officialSync: { status: 'synced' }, lastCompleted: null, sessions: {
+    [a]: { taskCredits: 79.18, taskAttribution: 'official-api', conversationCredits: 3671.66,
+      exactConversationCredits: 4088.9, officialConversationCredits: 3754.27, status: 'completed' }
+  } };
+  const result = run(`${updateHarness}
+    $script:testState='${JSON.stringify(state)}' | ConvertFrom-Json
+    $shared['route']='${a}'
+    & $update
+    $official=$convValue.Text
+    $script:testState.sessions.'${a}'.officialConversationCredits=$null
+    & $update
+    $fallback=$convValue.Text
+    $script:testState.lastCompleted=@{sessionId='${a}';at='2026-01-01T00:00:09Z';taskCredits=79.18;attribution='official-api'}
+    & $update
+    @{official=$official; fallback=$fallback; toast=$toastConv.Text} | ConvertTo-Json -Compress
+    $toast.Close()`);
+  assert.equal(result.official, '3754.27 Credits · 官网实扣');
+  assert.equal(result.fallback, '4088.90 Credits · 本地记录');
+  assert.equal(result.toast, '本次对话 4088.90 Credits · 本地记录');
+});
+
 test('a turn without official evidence is explicitly recorded-only even without a ledger residual', { skip: process.platform !== 'win32' }, () => {
   const state = { officialSync: { status: 'login-required' }, lastCompleted: null, sessions: {
     [a]: { taskCredits: 915.71, conversationCredits: 1000, status: 'completed', taskAttribution: 'transcript-only' }

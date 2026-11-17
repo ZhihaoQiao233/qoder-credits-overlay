@@ -548,8 +548,13 @@ $update = {
       # Only recorded server charges are shown; background completion is unknown.
       $task = [double]$session.taskCredits
       $conversation = [double]$session.conversationCredits
+      $convSource = '本地记录'
       if ($null -ne $session.exactConversationCredits) {
         $conversation = [double]$session.exactConversationCredits
+      }
+      if ($null -ne $session.officialConversationCredits) {
+        $conversation = [double]$session.officialConversationCredits
+        $convSource = '官网实扣'
       }
       $chipLabel.Text = '积分'
       $chipValue.Text = ('{0:F2}' -f $task)
@@ -565,7 +570,7 @@ $update = {
           $taskValue.Text = '--'
         }
       }
-      $convValue.Text = ('{0:F2} Credits' -f $conversation)
+      $convValue.Text = ('{0:F2} Credits · {1}' -f $conversation, $convSource)
       $modelValue.Text = Format-ModelBreakdown $session.taskByModel
       $hiddenTotal = Format-HiddenTotal $session.taskByModel
 
@@ -631,10 +636,15 @@ $update = {
         }
         if ($session) {
           $convDone = [double]$session.conversationCredits
+          $convDoneSource = '本地记录'
           if ($null -ne $session.exactConversationCredits) {
             $convDone = [double]$session.exactConversationCredits
           }
-          $toastConv.Text = ('本次对话 {0:F2} Credits' -f $convDone)
+          if ($null -ne $session.officialConversationCredits) {
+            $convDone = [double]$session.officialConversationCredits
+            $convDoneSource = '官网实扣'
+          }
+          $toastConv.Text = ('本次对话 {0:F2} Credits · {1}' -f $convDone, $convDoneSource)
         } else {
           $toastConv.Text = ''
         }

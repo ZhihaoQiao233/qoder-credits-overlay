@@ -466,6 +466,14 @@ export class Watcher {
     }
   }
 
+  #officialConversation(sessionId) {
+    const rows = this.officialUsage?.snapshot?.rows;
+    if (!rows) return null;
+    let cents = 0;
+    for (const row of rows) if (row.session_id === sessionId) cents += Math.round(row.credits * 100);
+    return cents / 100;
+  }
+
   #buildState() {
     const sessions = {};
     for (const [sessionId, session] of this.sessions) {
@@ -488,6 +496,7 @@ export class Watcher {
           settlement: t.official ? 'synced' : 'pending', hiddenByModel: t.hidden })),
         conversationCredits: credits2(snapshot.conversationCredits),
         exactConversationCredits: ledger ? credits2(ledger.totalCredits) : null,
+        officialConversationCredits: this.#officialConversation(sessionId),
         status: snapshot.status,
         startedAt: snapshot.startedAt,
         completedAt: snapshot.completedAt,

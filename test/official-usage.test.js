@@ -61,6 +61,20 @@ test('official credits replace recorded totals using both IDs, without adding th
   }
 });
 
+test('conversation total sums official rows per session in integer cents', async t => {
+  const f = fixture(t, [row('turn-0', 557.74), row('turn-1', 968.92),
+    row('turn-1', 0.11, { model_category: 'Cantus' }), row('turn-0', 1, { session_id: 'B' })]);
+  const state = await f.make().runOnce();
+  assert.equal(state.sessions.A.officialConversationCredits, 1526.77);
+  assert.equal(state.sessions.B.officialConversationCredits, 1);
+});
+
+test('without an official snapshot the official conversation total stays null', async t => {
+  const f = fixture(t, null);
+  const state = await f.make().runOnce();
+  assert.equal(state.sessions.A.officialConversationCredits, null);
+});
+
 test('free usage uses credits zero rather than original credits or transcript charges', async t => {
   const f = fixture(t, [row('turn-1', 0, { kind: 'Not Charged', original_credits: 968.92 })]);
   const s = (await f.make().runOnce()).sessions.A;
