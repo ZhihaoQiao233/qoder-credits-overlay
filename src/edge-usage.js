@@ -333,6 +333,9 @@ export class EdgeUsageSource {
       const deadline = Date.now() + 35000;
       const endpoint = await this.#discover(deadline);
       if (!endpoint.page) throw failure('usage-page-missing');
+      // A sleeping tab freezes timers and fetch callbacks; wake it right before
+      // evaluating or the page series stalls until the command timeout.
+      await cdp(endpoint.page, 'Page.setWebLifecycleState', { state: 'active' }, deadline);
       const expression = `(${readUsageInPage.toString()})(${JSON.stringify(input)}).catch(error => ({ error: { code: error.code === 'login-required' ? 'login-required' : 'sync-failed' } }))`;
       const result = await cdp(endpoint.page, 'Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true }, deadline);
       if (result.exceptionDetails) throw failure();

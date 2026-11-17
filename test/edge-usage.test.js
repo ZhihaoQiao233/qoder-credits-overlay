@@ -285,6 +285,7 @@ async function peer(t, options = {}) {
             return { result: { type: 'object', value } };
           }
           if (command.method === 'Target.createTarget') return { targetId: 'usage-target' };
+          if (command.method === 'Page.setWebLifecycleState') return {};
           throw new Error(`Unexpected CDP command: ${command.method}`);
         }).then(result => send(socket, { id: command.id, result }), () => send(socket, {
           id: command.id, error: { message: 'SECRET private-body' }
@@ -308,10 +309,19 @@ test('source validates browser identity before listing, evaluates only usage and
   const source = new feature.EdgeUsageSource({ profileDir: p.profileDir });
   assert.deepEqual(await source.read(args), { rows: [row('one')], from: args.startTime, to: args.endTime });
   assert.deepEqual(p.requests.slice(0, 2), ['/json/version', '/json/list']);
-  assert.equal(p.commands.length, 1);
-  assert.equal(p.commands[0].method, 'Runtime.evaluate');
-  assert.equal(p.commands[0].params.awaitPromise, true);
-  assert.equal(p.commands[0].params.returnByValue, true);
+  assert.equal(p.commands.length, 2);
+  assert.equal(p.commands[0].method, 'Page.setWebLifecycleState');
+  assert.equal(p.commands[1].method, 'Runtime.evaluate');
+  assert.equal(p.commands[1].params.awaitPromise, true);
+  assert.equal(p.commands[1].params.returnByValue, true);
+});
+
+test('read wakes a frozen usage tab immediately before evaluating', async t => {
+  const p = await peer(t);
+  const source = new feature.EdgeUsageSource({ profileDir: p.profileDir });
+  assert.deepEqual(await source.read(args), { rows: [row('one')], from: args.startTime, to: args.endTime });
+  assert.deepEqual(p.commands.map(c => c.method), ['Page.setWebLifecycleState', 'Runtime.evaluate']);
+  assert.deepEqual(p.commands[0].params, { state: 'active' });
 });
 
 test('serialized session strings cannot inject script into the page', async t => {
@@ -408,8 +418,8 @@ test('CDP handshake and command timeouts destroy sockets promptly', async t => {
 });
 
 test('CDP evaluation allows the bounded page series to finish after a single-request timeout', async t => {
-  const p = await peer(t, { command: async () => {
-    await new Promise(resolve => setTimeout(resolve, 110));
+  const p = await peer(t, { command: async command => {
+    if (command.method === 'Runtime.evaluate') await new Promise(resolve => setTimeout(resolve, 110));
     return { result: { value: { rows: [row('slow')], from: args.startTime, to: args.endTime } } };
   } });
   const realSetTimeout = globalThis.setTimeout;
