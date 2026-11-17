@@ -15,6 +15,7 @@ public class QoderWin32 {
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
   [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT point);
   [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, uint flags);
   [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr hWnd, int index);
@@ -235,21 +236,35 @@ if ([QoderWin32]::GetWindowRect($script:chipHwnd, [ref]$initRect)) {
 
 function Find-QoderWindow {
   $script:targetOnScreen = $false
-  $fallback = [IntPtr]::Zero
-  foreach ($proc in @(Get-Process -Name Qoder -ErrorAction SilentlyContinue)) {
-    $handle = $proc.MainWindowHandle
-    if ($handle -eq [IntPtr]::Zero) { continue }
-    if ($fallback -eq [IntPtr]::Zero) {
-      $fallback = $handle
+  $now = [DateTime]::UtcNow
+  $handle = $script:qoderHwnd
+  # 进程枚举每次约 7ms，dock 每 200ms 一轮；句柄活着就复用，失效或每 2s 才重新枚举。
+  if ($handle -eq [IntPtr]::Zero -or -not [QoderWin32]::IsWindow($handle) -or ($now - $script:qoderHwndAt).TotalMilliseconds -ge 2000) {
+    $handle = [IntPtr]::Zero
+    $fallback = [IntPtr]::Zero
+    foreach ($proc in @(Get-Process -Name Qoder -ErrorAction SilentlyContinue)) {
+      $h = $proc.MainWindowHandle
+      if ($h -eq [IntPtr]::Zero) { continue }
+      if ($fallback -eq [IntPtr]::Zero) {
+        $fallback = $h
+      }
+      # Electron 有多个同名进程，优先认真正显示在屏幕上的那个窗口。
+      if ([QoderWin32]::IsWindowVisible($h) -and (-not [QoderWin32]::IsIconic($h))) {
+        $handle = $h
+        break
+      }
     }
-    # Electron 有多个同名进程，优先认真正显示在屏幕上的那个窗口。
-    if ([QoderWin32]::IsWindowVisible($handle) -and (-not [QoderWin32]::IsIconic($handle))) {
-      $script:targetOnScreen = $true
-      return $handle
-    }
+    if ($handle -eq [IntPtr]::Zero) { $handle = $fallback }
+    $script:qoderHwnd = $handle
+    $script:qoderHwndAt = $now
   }
-  return $fallback
+  if ($handle -ne [IntPtr]::Zero -and [QoderWin32]::IsWindowVisible($handle) -and (-not [QoderWin32]::IsIconic($handle))) {
+    $script:targetOnScreen = $true
+  }
+  return $handle
 }
+$script:qoderHwnd = [IntPtr]::Zero
+$script:qoderHwndAt = [DateTime]::MinValue
 
 function Get-WindowSize([IntPtr]$handle, [double]$fallbackWidth, [double]$fallbackHeight) {
   $rect = New-Object QoderWin32+RECT
@@ -350,6 +365,7 @@ $toastTimer.Add_Tick({ $toastTimer.Stop(); $toast.Hide() })
 $dock = {
   try {
     $qoderHwnd = Find-QoderWindow
+    $shared['hwnd'] = $qoderHwnd
     Bind-QoderOwner $qoderHwnd
 
     $chipSize = Get-WindowSize $script:chipHwnd $chip.Width $chip.Height
@@ -517,7 +533,7 @@ $update = {
     }
 
     $state = Read-SharedJson $statePath
-    $viewedSessionId = Get-ViewedSessionId (Find-QoderWindow)
+    $viewedSessionId = $shared['route']
     if ($viewedSessionId -ne $script:viewedSessionId) {
       $script:viewedSessionId = $viewedSessionId
       $toast.Hide()
@@ -543,6 +559,11 @@ $update = {
         # A running total is still growing; label it so it cannot be read as final.
         $chipLabel.Text = '记录中'
         $taskLabel.Text = '本轮记录中 · 待结清'
+        if ($task -eq 0) {
+          # Newer Qoder builds write no local usage; a bare 0.00 would read as a fake charge.
+          $chipValue.Text = '--'
+          $taskValue.Text = '--'
+        }
       }
       $convValue.Text = ('{0:F2} Credits' -f $conversation)
       $modelValue.Text = Format-ModelBreakdown $session.taskByModel
@@ -634,6 +655,32 @@ $update = {
   }
 }
 
+$shared = [hashtable]::Synchronized(@{ hwnd = [IntPtr]::Zero; route = $null; stop = $false })
+# UIA 读路由是同步跨进程调用，Qoder UI 线程卡住时调用方会陪葬；
+# 放进后台 runspace，UI 线程只读缓存，悬浮窗不随 Qoder 挂起。
+$tokens = $null; $parseErrors = $null
+$selfAst = [System.Management.Automation.Language.Parser]::ParseFile($PSCommandPath, [ref]$tokens, [ref]$parseErrors)
+$readerText = (@($selfAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in @('Get-RouteSessionId', 'Get-ViewedSessionId') }, $true)) | ForEach-Object { $_.Extent.Text }) -join "`n"
+$bgScript = @'
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+'@ + "`n" + $readerText + "`n" + @'
+while (-not $shared['stop']) {
+  try {
+    $h = [IntPtr]$shared['hwnd']
+    if ($h -ne [IntPtr]::Zero) { $shared['route'] = Get-ViewedSessionId $h } else { $shared['route'] = $null }
+  } catch {}
+  Start-Sleep -Milliseconds 1000
+}
+'@
+$script:readerRunspace = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+$script:readerRunspace.Open()
+$script:readerRunspace.SessionStateProxy.SetVariable('shared', $shared)
+$script:readerPs = [PowerShell]::Create()
+$script:readerPs.Runspace = $script:readerRunspace
+$script:readerPs.AddScript($bgScript) | Out-Null
+$script:readerPs.BeginInvoke() | Out-Null
+
 $timer = New-Object System.Windows.Threading.DispatcherTimer
 $timer.Interval = [TimeSpan]::FromSeconds(1)
 $timer.Add_Tick($update)
@@ -649,6 +696,9 @@ $chip.Add_Closed({
   $timer.Stop()
   $dockTimer.Stop()
   $toastTimer.Stop()
+  $shared['stop'] = $true
+  $script:readerPs.Stop()
+  $script:readerRunspace.Dispose()
   $mutex.ReleaseMutex()
   $mutex.Dispose()
 })

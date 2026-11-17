@@ -13,7 +13,7 @@ const run = body => {
     $tokens=$null; $errors=$null
     $ast=[System.Management.Automation.Language.Parser]::ParseFile('${script}',[ref]$tokens,[ref]$errors)
     if ($errors.Count) { throw $errors[0] }
-    $names=@('Get-RouteSessionId','Select-ViewedSession','Brush','Format-ModelBreakdown','Format-HiddenTotal')
+    $names=@('Get-RouteSessionId','Select-ViewedSession','Brush','Format-ModelBreakdown','Format-HiddenTotal','Find-QoderWindow')
     $ast.FindAll({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -in $names},$true) | ForEach-Object { Invoke-Expression $_.Extent.Text }
     ${body}
   `;
@@ -57,8 +57,7 @@ const updateHarness = `
   $toastTimer=New-Object System.Windows.Threading.DispatcherTimer
   $statePath='${script}'
   function Read-SharedJson { return $script:testState }
-  function Find-QoderWindow { return [IntPtr]::Zero }
-  function Get-ViewedSessionId { return $script:testViewedSessionId }
+  $shared=[hashtable]::Synchronized(@{hwnd=[IntPtr]::Zero;route=$null})
   $script:viewedSessionId=$null
   $script:lastCompletedAt=$null
   $script:baselineSet=$false
@@ -75,7 +74,7 @@ test('official display takes precedence over ledger residuals and marks offline 
   } };
   const result = run(`${updateHarness}
     $script:testState='${JSON.stringify(state)}' | ConvertFrom-Json
-    $script:testViewedSessionId='${a}'
+    $shared['route']='${a}'
     & $update
     $online=@{chip=$chipValue.Text; label=$taskLabel.Text; calibration=$calibValue.Text; model=$modelValue.Text}
     $script:testState.officialSync.status='browser-closed'
@@ -96,7 +95,7 @@ test('a turn without official evidence is explicitly recorded-only even without 
   } };
   const result = run(`${updateHarness}
     $script:testState='${JSON.stringify(state)}' | ConvertFrom-Json
-    $script:testViewedSessionId='${a}'
+    $shared['route']='${a}'
     & $update
     @{label=$taskLabel.Text; chipLabel=$chipLabel.Text; calibration=$calibValue.Text} | ConvertTo-Json -Compress
     $toast.Close()`);
@@ -111,7 +110,7 @@ test('a running turn is labelled as still being recorded, not a final charge', {
   } };
   const result = run(`${updateHarness}
     $script:testState='${JSON.stringify(state)}' | ConvertFrom-Json
-    $script:testViewedSessionId='${a}'
+    $shared['route']='${a}'
     & $update
     @{chip=$chipValue.Text; chipLabel=$chipLabel.Text; label=$taskLabel.Text} | ConvertTo-Json -Compress
     $toast.Close()`);
@@ -120,6 +119,22 @@ test('a running turn is labelled as still being recorded, not a final charge', {
   assert.match(result.label, /记录中/);
   assert.match(result.label, /待结清/);
   assert.doesNotMatch(result.label, /官网实扣/);
+});
+
+test('a running turn with no recorded evidence shows a placeholder, not a fake zero', { skip: process.platform !== 'win32' }, () => {
+  const state = { officialSync: { status: 'synced' }, lastCompleted: null, sessions: {
+    [a]: { taskCredits: 0, taskRecordedCredits: 0, conversationCredits: 100, status: 'running', taskAttribution: 'transcript-only' }
+  } };
+  const result = run(`${updateHarness}
+    $script:testState='${JSON.stringify(state)}' | ConvertFrom-Json
+    $shared['route']='${a}'
+    & $update
+    @{chip=$chipValue.Text; task=$taskValue.Text; chipLabel=$chipLabel.Text; label=$taskLabel.Text} | ConvertTo-Json -Compress
+    $toast.Close()`);
+  assert.equal(result.chip, '--');
+  assert.equal(result.task, '--');
+  assert.equal(result.chipLabel, '记录中');
+  assert.match(result.label, /待结清/);
 });
 
 const updateState = {
@@ -134,7 +149,7 @@ const updateState = {
 test('the actual update queues a toast only for the viewed conversation', { skip: process.platform !== 'win32' }, () => {
   const result = run(`${updateHarness}
     $script:testState='${JSON.stringify(updateState)}' | ConvertFrom-Json
-    $script:testViewedSessionId='${a}'
+    $shared['route']='${a}'
     & $update
     $script:testState.lastCompleted.at='2026-01-01T00:00:02Z'
     & $update
@@ -154,15 +169,65 @@ test('the actual update queues a toast only for the viewed conversation', { skip
 test('switching to an unknown view clears displayed charges and a pending toast', { skip: process.platform !== 'win32' }, () => {
   const result = run(`${updateHarness}
     $script:testState='${JSON.stringify(updateState)}' | ConvertFrom-Json
-    $script:testViewedSessionId='${b}'
+    $shared['route']='${b}'
     & $update
     $script:testState.lastCompleted.at='2026-01-01T00:00:02Z'
     & $update
     $wasPending=$script:toastPending
     $toastTimer.Start()
-    $script:testViewedSessionId=$null
+    $shared['route']=$null
     & $update
     @{wasPending=$wasPending; pending=$script:toastPending; timer=$toastTimer.IsEnabled; chip=$chipValue.Text; task=$taskValue.Text; conversation=$convValue.Text} | ConvertTo-Json -Compress
     $toast.Close()`);
   assert.deepEqual(result, { wasPending: true, pending: false, timer: false, chip: '--', task: '--', conversation: '--' });
+});
+
+const win32 = `Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class QoderWin32 {
+  [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
+}
+"@`;
+
+test('a fresh cached window handle is reused without enumerating processes', { skip: process.platform !== 'win32' }, () => {
+  const result = run(`${win32}
+    $real=(Get-Process explorer | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1).MainWindowHandle
+    $script:qoderHwnd=$real
+    $script:qoderHwndAt=[DateTime]::UtcNow
+    function Get-Process { param($Name,$ErrorAction) throw 'enumerated' }
+    $h=Find-QoderWindow
+    @{reused=($h -eq $real)} | ConvertTo-Json -Compress`);
+  assert.equal(result.reused, true);
+});
+
+test('a stale or dead cached handle triggers re-enumeration', { skip: process.platform !== 'win32' }, () => {
+  const result = run(`${win32}
+    $real=(Get-Process explorer | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1).MainWindowHandle
+    function Get-Process { param($Name,$ErrorAction) [PSCustomObject]@{MainWindowHandle=$real} }
+    $script:qoderHwnd=$real
+    $script:qoderHwndAt=[DateTime]::UtcNow.AddSeconds(-5)
+    $stale=Find-QoderWindow
+    $script:qoderHwnd=[IntPtr]12345
+    $script:qoderHwndAt=[DateTime]::UtcNow
+    $dead=Find-QoderWindow
+    @{stale=($stale -eq $real); dead=($dead -eq $real)} | ConvertTo-Json -Compress`);
+  assert.deepEqual(result, { stale: true, dead: true });
+});
+
+test('update reads the cached route and never blocks on the accessibility reader', { skip: process.platform !== 'win32' }, () => {
+  const result = run(`${updateHarness}
+    function Get-ViewedSessionId { param($h) Start-Sleep -Seconds 5; return '${b}' }
+    function Find-QoderWindow { Start-Sleep -Seconds 5; return [IntPtr]::Zero }
+    $script:testState='${JSON.stringify(updateState)}' | ConvertFrom-Json
+    $shared['route']='${a}'
+    $sw=[System.Diagnostics.Stopwatch]::StartNew()
+    & $update
+    $sw.Stop()
+    @{ms=$sw.ElapsedMilliseconds; chip=$chipValue.Text} | ConvertTo-Json -Compress
+    $toast.Close()`);
+  assert.ok(result.ms < 1500, `update blocked ${result.ms}ms`);
+  assert.equal(result.chip, '90.00');
 });
