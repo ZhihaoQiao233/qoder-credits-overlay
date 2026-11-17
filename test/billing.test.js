@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { SubagentScanner } from '../src/subagents.js';
 import { UsageAggregator } from '../src/aggregator.js';
+import { UsageLogIndex } from '../src/usage-log.js';
 import { Watcher } from '../src/watcher.js';
 
 const at = n => `2026-01-01T00:00:${String(n).padStart(2, '0')}.000Z`;
@@ -134,4 +135,26 @@ test('ledger reconciliation does not depend on main/subagent ingestion order', (
   a.addRecords('A', [usage('main-1', 1, at(1)), usage('main-3', 1, at(3))]);
   a.addRecords('A', [usage('sub-2', 1, at(2))]);
   assert.deepEqual(a.sumByModelThrough('A', 'main-3', at(3)), { m: 3 });
+});
+
+test('export is cached between scans and refreshes when new log lines arrive', t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'credits-usage-cache-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const log = path.join(dir, 'runs', 'run1', 'qodercli.log');
+  fs.mkdirSync(path.dirname(log), { recursive: true });
+  fs.mkdirSync(path.join(dir, 'sessions', 'p', 'A', 'segments'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'sessions', 'p', 'A', 'segments', 'run1.jsonl'), '');
+  const line = id => `2026-11-08T00:00:00.000Z INFO debug.message [QoderInferResponse] reason=stop, sessionId=A, qoderRequestId=${id}, serverRequestId=s-${id},`;
+  fs.writeFileSync(log, line('r1') + '\n');
+  const idx = new UsageLogIndex({ root: dir });
+  idx.scan('A');
+  const first = idx.export();
+  assert.equal(first.length, 1);
+  assert.equal(idx.export(), first);
+  assert.equal(idx.records('A').length, 1);
+  fs.appendFileSync(log, line('r2') + '\n');
+  idx.scan('A');
+  const second = idx.export();
+  assert.notEqual(second, first);
+  assert.deepEqual(second.map(r => r.requestId).sort(), ['r1', 'r2']);
 });

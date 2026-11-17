@@ -19,6 +19,7 @@ export class UsageLogIndex {
     this.files = new Map();
     this.probes = new Map();
     this.saved = new Map();
+    this.exportCache = null;
     for (const r of saved) {
       if (!r?.sessionId || !r.requestId || (r.ownerId !== null && typeof r.ownerId !== 'string')) continue;
       if (r.credits !== null && r.credits !== undefined && (typeof r.credits !== 'number' || r.credits < 0 || !Number.isFinite(r.credits))) continue;
@@ -29,6 +30,7 @@ export class UsageLogIndex {
   addLine(runId, line) {
     const match = line.match(prefix);
     if (!match) return;
+    this.exportCache = null;
     const [, ts, message] = match;
     let run = this.runs.get(runId);
     if (!run) {
@@ -63,6 +65,7 @@ export class UsageLogIndex {
   }
 
   export() {
+    if (this.exportCache) return this.exportCache;
     const merged = new Map(this.saved);
     for (const run of this.runs.values()) {
       for (const [requestId, req] of run.requests) {
@@ -94,7 +97,8 @@ export class UsageLogIndex {
         merged.set(key, record);
       }
     }
-    return [...merged.values()];
+    this.exportCache = [...merged.values()];
+    return this.exportCache;
   }
 
   records(sessionId) { return this.export().filter(r => r.sessionId === sessionId); }
