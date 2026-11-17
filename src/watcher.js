@@ -78,6 +78,8 @@ export class Watcher {
     this.officialUsageFile = options.officialUsageFile || path.join(this.dataDir, 'official-usage.json');
     this.officialSource = options.officialSource ?? null;
     this.officialSyncMs = options.officialSyncMs ?? 30000;
+    this.officialReopenMs = options.officialReopenMs ?? 60000;
+    this.lastOfficialReopen = 0;
     this.settleSyncMs = options.settleSyncMs ?? 5000;
     this.settleWindowMs = options.settleWindowMs ?? 120000;
     this.fastUntil = 0;
@@ -528,6 +530,13 @@ export class Watcher {
       const allowed = ['browser-closed', 'login-required', 'usage-page-missing', 'invalid-data'];
       this.officialSync = { status: allowed.includes(error.code) ? error.code : 'sync-failed',
         updatedAt: this.officialUsage.snapshot?.updatedAt ?? null };
+      // A closed dedicated browser is recoverable: relaunch it (throttled) so the
+      // next cycle can sync again without a manual watcher restart.
+      if (error.code === 'browser-closed' && typeof this.officialSource.open === 'function'
+        && Date.now() - this.lastOfficialReopen >= this.officialReopenMs) {
+        this.lastOfficialReopen = Date.now();
+        try { await this.officialSource.open(); } catch { /* login or launch problems surface next cycle */ }
+      }
     } finally {
       this.officialSyncPending = false;
       this.nextOfficialSync = Date.now() + this.#officialDelay();

@@ -174,6 +174,28 @@ test('an unavailable browser preserves the last verified amount and reports it a
   assert.equal(JSON.parse(fs.readFileSync(f.officialUsageFile, 'utf8')).updatedAt, updatedAt);
 });
 
+test('a closed dedicated browser is reopened automatically so official sync can resume', async t => {
+  let opened = 0, closed = true;
+  const source = {
+    async open() { opened++; closed = false; },
+    async read() {
+      if (closed) throw Object.assign(new Error('browser-closed'), { code: 'browser-closed' });
+      return { from, to, rows: [row('turn-1', 968.92)] };
+    }
+  };
+  const f = fixture(t, null, source);
+  const w = new Watcher({ dataDir: f.dir, eventsFile: f.eventsFile, stateFile: path.join(f.dir, 'state.json'),
+    officialUsageFile: f.officialUsageFile, officialSource: source, officialSyncMs: 30000, officialReopenMs: 0,
+    logPath: null, usageLogRoot: null, stopGraceMs: 0, launchOverlay: false });
+  await w.runOnce();
+  await w.syncOfficial();
+  assert.equal(w.officialSync.status, 'browser-closed');
+  assert.equal(opened, 1);
+  await w.syncOfficial();
+  assert.equal(w.officialSync.status, 'synced');
+  assert.equal((await w.runOnce()).sessions.A.taskCredits, 968.92);
+});
+
 test('a malformed refresh preserves a good cache and reports invalid data', async t => {
   const source = { async read() { return { from, to, rows: [row('turn-1', 'bad')] }; } };
   const f = fixture(t, [row('turn-1', 968.92)], source);
